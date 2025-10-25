@@ -1,10 +1,7 @@
 import numpy as np
 import pandas as pd
 import networkx as nx
-import itertools
-from sklearn.linear_model import LinearRegression
-from scipy.stats import pearsonr
-
+from causallearn.search.ScoreBased.GES import ges
 from datetime import datetime, timedelta
 import json
 import re
@@ -424,44 +421,46 @@ def estimate_edge_confidence(data: pd.DataFrame, n_bootstrap: int = 20) -> dict:
 
 
 def discover_sock_shop_causal_dag(data: pd.DataFrame) -> tuple:
-    """
-    Discover approximate causal DAG using pairwise correlations and
-    directional inference via regression residuals (works with Python 3.12)
-    """
-    print("\n" + "=" * 80)
-    print("         CAUSAL DISCOVERY (Correlation-Based Lightweight Mode)")
-    print("=" * 80)
-    print(f"[Lightweight] Analyzing {data.shape[0]} samples × {data.shape[1]} metrics...")
-
-    G = nx.DiGraph()
-    G.add_nodes_from(data.columns)
-    confidence_scores = {}
-
-    cols = list(data.columns)
-    for a, b in itertools.permutations(cols, 2):
-        try:
-            x, y = data[a].values.reshape(-1, 1), data[b].values
-            corr, _ = pearsonr(data[a], data[b])
-            if abs(corr) > 0.6:
-                # Direction via regression residuals
-                model = LinearRegression().fit(x, y)
-                residuals = y - model.predict(x)
-                reverse_model = LinearRegression().fit(y.reshape(-1, 1), data[a])
-                reverse_resid = data[a] - reverse_model.predict(y.reshape(-1, 1))
-                if residuals.std() < reverse_resid.std():
-                    G.add_edge(a, b)
-                else:
-                    G.add_edge(b, a)
-                confidence_scores[(a, b)] = round(abs(corr), 2)
-        except Exception:
-            continue
-
-    # Remove cycles
+    """Discover Causal DAG for Sock Shop microservices"""
+    print("\n" + "="*80)
+    print("                  CAUSAL DISCOVERY - SOCK SHOP")
+    print("="*80)
+    print(f"\n[GES Algorithm] Analyzing {len(data)} time windows across {len(data.columns)} metrics...")
+    
+    # Run GES
+    cg = ges(data.values)
+    adj_matrix = get_adj_matrix_custom(cg)
+    
+    # Create NetworkX graph
+    G = nx.from_numpy_array(adj_matrix, create_using=nx.DiGraph)
+    G = nx.relabel_nodes(G, dict(enumerate(data.columns)))
+    
+    # Enforce DAG structure
     G = enforce_dag(G)
-    print(f"✅ Discovered {len(G.nodes())} nodes and {len(G.edges())} edges")
+    
+    # Estimate confidence scores
+    confidence_scores = {}
+    if len(G.edges()) > 0:
+        confidence_scores = estimate_edge_confidence(data, n_bootstrap=20)
+    
+    # Print causal relationships
+    if G.edges:
+        print("\n" + "="*80)
+        print("                  DISCOVERED CAUSAL RELATIONSHIPS")
+        print("="*80)
+        print(f"{'CAUSE METRIC':<35} -> {'EFFECT METRIC':<35} {'CONF.':<8}")
+        print("-"*80)
+        
+        sorted_edges = sorted(G.edges(), key=lambda e: confidence_scores.get(e, 0), reverse=True)
+        for u, v in sorted_edges:
+            confidence = confidence_scores.get((u, v), 0.0)
+            confidence_str = f"{confidence:.0%}" if confidence > 0 else "N/A"
+            print(f"{u:<35} -> {v:<35} {confidence_str:<8}")
+        print("="*80)
+    else:
+        print("⚠ No causal edges detected.")
+    
     return G, confidence_scores
-
-
 
 
 def visualize_sock_shop_dag(causal_dag: nx.DiGraph, confidence_scores: dict,
@@ -664,58 +663,4 @@ def run_sock_shop_hackathon_demo():
 
 
 if __name__ == "__main__":
-    # ============================================================
-    # LIVE CAUSAL ENGINE MODE (OpenTelemetry Integration)
-    # ============================================================
-
-    print("\n[Mode] Live Causal Discovery using OpenTelemetry metrics")
-    metrics_path = "node_metrics.csv"
-
-    try:
-        metrics_df = pd.read_csv(metrics_path)
-        print(f"✅ Loaded {len(metrics_df)} rows from {metrics_path}")
-    except FileNotFoundError:
-        print(f"❌ {metrics_path} not found. Please run export_otel_live.py first.")
-        exit(1)
-
-    # Pivot to wide format: each metric becomes a column per service
-    # (GNN expects node → features, Causal engine expects columns)
-    pivoted = metrics_df.pivot_table(
-        index="timestamp",
-        columns="node",
-        values=["req_rate", "latency", "error_rate", "cpu_usage", "memory_usage"],
-        aggfunc="mean"
-    )
-
-    # Flatten MultiIndex column names (e.g., req_rate.frontend → frontend_req_rate)
-    pivoted.columns = [f"{metric}_{service}" for metric, service in pivoted.columns]
-    pivoted = pivoted.dropna(axis=1, how="all").fillna(0)
-
-    print(f"✅ Prepared dataset shape: {pivoted.shape}")
-
-    # Run causal discovery (same GES algorithm as before)
-    causal_dag, confidence_scores = discover_sock_shop_causal_dag(pivoted)
-
-    # Convert to JSON for GNN
-    edges = []
-    for u, v in causal_dag.edges():
-        edges.append({
-            "source": u,
-            "target": v,
-            "confidence": round(confidence_scores.get((u, v), 0.85), 2)
-        })
-
-    graph_json = {
-        "nodes": [{"id": n, "label": n} for n in sorted(causal_dag.nodes())],
-        "edges": edges,
-        "metadata": {
-            "total_nodes": len(causal_dag.nodes()),
-            "total_edges": len(causal_dag.edges()),
-            "is_dag": nx.is_directed_acyclic_graph(causal_dag)
-        }
-    }
-
-    with open("causal_graph.json", "w") as f:
-        json.dump(graph_json, f, indent=2)
-
-    print("\n✅ Updated causal_graph.json successfully.")
+    causal_dag, data, confidence, incidents = run_sock_shop_hackathon_demo()
